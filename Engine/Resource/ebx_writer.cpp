@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace dingosdk::frostbite::ebx {
 
@@ -92,6 +93,7 @@ public:
         write_instances();
         write_arrays();
         write_boxed_values();
+        place_boxed_region();
         const auto stringOffset = checked_u32(payload_.size(), "EBX string offset");
         write_strings();
         resolve_pointers();
@@ -105,7 +107,7 @@ private:
     struct PendingArray {
         std::uint32_t slot{};
         const Value::Array* values{};
-        std::size_t descriptor{};
+        FieldDescriptor field;
         bool emitted{};
     };
 
@@ -122,7 +124,24 @@ private:
     struct PendingBoxed {
         std::uint32_t slot{};
         BoxedReference value;
+        std::uint32_t placed{}; // where a decoded box landed: boxed-region relative until placed
+        bool laidOut{};
     };
+
+    // Boxed values are written into their own buffer while the arrays they use are still
+    // being added to the array section; a slot inside that buffer carries this bit until
+    // the buffer's place in the payload is known (place_boxed_region).
+    static constexpr std::uint32_t boxedRegion = 0x80000000U;
+    [[nodiscard]] std::vector<std::byte>& buffer() { return inBoxed_ ? boxedBuffer_ : payload_; }
+    [[nodiscard]] std::uint32_t slot_at(const std::size_t position, const char* label) const {
+        const auto value = checked_u32(position, label);
+        if (value & boxedRegion) throw std::overflow_error(label);
+        return inBoxed_ ? value | boxedRegion : value;
+    }
+    [[nodiscard]] std::uint32_t resolve(const std::uint32_t slot) const {
+        return slot & boxedRegion ? checked_u32(static_cast<std::size_t>(boxedOffset_) + (slot & ~boxedRegion), "EBX boxed slot")
+                                  : slot;
+    }
 
     static std::uint32_t checked_u32(const std::size_t value, const char* label) {
         if (value > std::numeric_limits<std::uint32_t>::max()) throw std::overflow_error(label);
@@ -148,18 +167,19 @@ private:
     }
 
     void grow(const std::size_t end) {
-        if (end > payload_.size()) payload_.resize(end);
+        auto& target = buffer();
+        if (end > target.size()) target.resize(end);
     }
 
     template <typename Type>
     void put_number(const std::size_t offset, const Type value) {
         grow(offset + sizeof(value));
-        std::memcpy(payload_.data() + offset, &value, sizeof(value));
+        std::memcpy(buffer().data() + offset, &value, sizeof(value));
     }
 
     void put(const std::size_t offset, const std::span<const std::byte> bytes) {
         grow(offset + bytes.size());
-        std::ranges::copy(bytes, payload_.begin() + static_cast<std::ptrdiff_t>(offset));
+        std::ranges::copy(bytes, buffer().begin() + static_cast<std::ptrdiff_t>(offset));
     }
 
     const Value* value_for(const Object* object, const std::size_t descriptor) const {
@@ -203,12 +223,7 @@ private:
             const auto position = start + field.dataOffset;
             const auto* value = value_for(object, descriptorIndex);
             if (field.category() == FieldCategory::array) {
-                grow(position + 8);
-                pointerOffsets_.push_back(checked_u32(position, "EBX array slot"));
-                static const Value::Array empty;
-                const auto* array = value ? std::get_if<Value::Array>(&value->data) : nullptr;
-                arraysPending_.push_back({checked_u32(position, "EBX array slot"), array ? array : &empty,
-                                          descriptorIndex});
+                write_array_slot(field, position, value);
             } else if (field.type() == FieldType::structure) {
                 if (field.classRef >= document_.types.size()) throw std::runtime_error("EBX struct type is invalid");
                 const auto nestedStart = align_up(position, std::max<std::size_t>(document_.types[field.classRef].alignment, 1));
@@ -217,6 +232,28 @@ private:
             } else {
                 write_scalar(field, position, value);
             }
+        }
+    }
+
+    void write_array_slot(const FieldDescriptor& field, const std::size_t position, const Value* value) {
+        grow(position + 8);
+        put_number(position, std::uint64_t{});
+        pointerOffsets_.push_back(slot_at(position, "EBX array slot"));
+        static const Value::Array empty;
+        const auto* array = value ? std::get_if<Value::Array>(&value->data) : nullptr;
+        arraysPending_.push_back({slot_at(position, "EBX array slot"), array ? array : &empty, field});
+    }
+
+    // One value of `field`'s type at `position`, whatever its kind: what a boxed value holds.
+    void write_field(const FieldDescriptor& field, const std::size_t position, const Value* value) {
+        if (field.category() == FieldCategory::array) {
+            write_array_slot(field, position, value);
+        } else if (field.type() == FieldType::structure) {
+            if (field.classRef >= document_.types.size()) throw std::runtime_error("EBX struct type is invalid");
+            const auto* nested = value ? std::get_if<std::shared_ptr<Object>>(&value->data) : nullptr;
+            write_type(field.classRef, position, nested && *nested ? nested->get() : nullptr);
+        } else {
+            write_scalar(field, position, value);
         }
     }
 
@@ -250,11 +287,11 @@ private:
         }
         case FieldType::string: {
             grow(position + 32);
-            std::fill_n(payload_.begin() + static_cast<std::ptrdiff_t>(position), 32, std::byte{});
+            std::fill_n(buffer().begin() + static_cast<std::ptrdiff_t>(position), 32, std::byte{});
             const auto* string = std::get_if<std::string>(&source.data);
             if (string) {
                 if (string->size() > 31) throw std::overflow_error("EBX fixed string exceeds 31 bytes");
-                std::memcpy(payload_.data() + position, string->data(), string->size());
+                std::memcpy(buffer().data() + position, string->data(), string->size());
             }
             break;
         }
@@ -262,23 +299,23 @@ private:
         case FieldType::fileRef: {
             grow(position + 8);
             put_number(position, std::uint64_t{});
-            pointerOffsets_.push_back(checked_u32(position, "EBX string slot"));
+            pointerOffsets_.push_back(slot_at(position, "EBX string slot"));
             const auto* string = std::get_if<std::string>(&source.data);
             if (string && string->size() > 1024 * 1024) throw std::overflow_error("EBX string exceeds the authoring limit");
-            stringsPending_.push_back({checked_u32(position, "EBX string slot"), string ? *string : std::string{}});
+            stringsPending_.push_back({slot_at(position, "EBX string slot"), string ? *string : std::string{}});
             break;
         }
         case FieldType::resourceRef: {
             const auto* reference = std::get_if<ResourceReference>(&source.data);
             put_number(position, reference ? reference->id : std::uint64_t{});
-            resourceOffsets_.push_back(checked_u32(position, "EBX resource slot"));
+            resourceOffsets_.push_back(slot_at(position, "EBX resource slot"));
             break;
         }
         case FieldType::pointer: {
             grow(position + 8);
             put_number(position, std::uint64_t{});
             const auto* pointer = std::get_if<PointerReference>(&source.data);
-            pointersPending_.push_back({checked_u32(position, "EBX pointer slot"), pointer ? *pointer : PointerReference{}});
+            pointersPending_.push_back({slot_at(position, "EBX pointer slot"), pointer ? *pointer : PointerReference{}});
             break;
         }
         case FieldType::typeRef:
@@ -289,7 +326,7 @@ private:
             put_number(position, encoded);
             put_number(position + 4, std::uint32_t{});
             if (encoded != 0 && field.type() == FieldType::typeRef) {
-                typeInfoOffsets_.push_back(checked_u32(position, "EBX type-info slot"));
+                typeInfoOffsets_.push_back(slot_at(position, "EBX type-info slot"));
             }
             break;
         }
@@ -297,14 +334,14 @@ private:
             grow(position + 16);
             const auto* reference = std::get_if<BoxedReference>(&source.data);
             if (!reference || reference->encodedType == 0) {
-                std::fill_n(payload_.begin() + static_cast<std::ptrdiff_t>(position), 16, std::byte{});
+                std::fill_n(buffer().begin() + static_cast<std::ptrdiff_t>(position), 16, std::byte{});
                 break;
             }
             put_number(position, reference->encodedType);
             put_number(position + 4, std::uint32_t{});
-            typeInfoOffsets_.push_back(checked_u32(position, "EBX boxed type slot"));
-            pointerOffsets_.push_back(checked_u32(position + 8, "EBX boxed pointer slot"));
-            boxesPending_.push_back({checked_u32(position, "EBX boxed slot"), *reference});
+            typeInfoOffsets_.push_back(slot_at(position, "EBX boxed type slot"));
+            pointerOffsets_.push_back(slot_at(position + 8, "EBX boxed pointer slot"));
+            boxesPending_.push_back({slot_at(position, "EBX boxed slot"), *reference});
             break;
         }
         default:
@@ -356,26 +393,78 @@ private:
         arraysOffset_ = checked_u32(align_up(payload_.size(), 16), "EBX array section");
         grow(static_cast<std::size_t>(arraysOffset_) + 32);
         emptyArrayTarget_ = arraysOffset_ + 16;
-        for (std::size_t index = 0; index < arraysPending_.size(); ++index) {
-            if (!arraysPending_[index].emitted) emit_array(index);
+        // Arrays and decoded boxed values refer to one another: a box can hold an array and
+        // an array element a box. Arrays stay in the array section and boxes are laid out in
+        // their own buffer, until neither has anything left to add.
+        for (bool more = true; more;) {
+            more = false;
+            for (std::size_t index = 0; index < arraysPending_.size(); ++index) {
+                if (!arraysPending_[index].emitted) emit_array(index), more = true;
+            }
+            for (std::size_t index = 0; index < boxesPending_.size(); ++index) {
+                if (!boxesPending_[index].laidOut && boxesPending_[index].value.value) lay_out_box(index), more = true;
+            }
         }
+    }
+
+    void lay_out_box(const std::size_t index) {
+        boxesPending_[index].laidOut = true;
+        const auto reference = boxesPending_[index].value; // copied: laying out may add pending boxes
+        FieldDescriptor field;
+        field.encodedType = static_cast<std::uint16_t>(reference.record.encodedType >> 1);
+        if (reference.record.classRef != 0xFFFF) {
+            const auto descriptor = descriptor_for_fixup(reference.record.classRef);
+            if (descriptor < 0) throw std::runtime_error("EBX boxed value type is not in the type table");
+            field.classRef = static_cast<std::uint16_t>(descriptor);
+        }
+        std::size_t size = 8, alignment = 8;
+        if (field.category() != FieldCategory::array) {
+            if (field.type() == FieldType::structure) {
+                if (field.classRef >= document_.types.size()) throw std::runtime_error("EBX boxed struct type is invalid");
+                size = std::max<std::size_t>(document_.types[field.classRef].size, 1);
+                alignment = std::max<std::size_t>(document_.types[field.classRef].alignment, 8);
+            } else {
+                size = scalar_size(field.type());
+            }
+        }
+        const bool wasBoxed = inBoxed_;
+        inBoxed_ = true;
+        const auto position = align_up(boxedBuffer_.size(), alignment);
+        grow(position + size);
+        write_field(field, position, reference.value.get());
+        inBoxed_ = wasBoxed;
+        boxesPending_[index].placed = checked_u32(position, "EBX boxed value");
+        boxedRecords_.push_back({checked_u32(position, "EBX boxed value"), 1, reference.record.hash,
+                                 reference.record.encodedType, reference.record.classRef, {}});
+    }
+
+    [[nodiscard]] std::int32_t descriptor_for_fixup(const std::uint16_t slot) const {
+        if (slot >= document_.fixupTypeGuids.size() || slot >= document_.fixupTypeSignatures.size()) return -1;
+        for (std::size_t index = 0; index < document_.types.size(); ++index)
+            if (document_.types[index].guid == document_.fixupTypeGuids[slot] &&
+                document_.types[index].signature == document_.fixupTypeSignatures[slot])
+                return static_cast<std::int32_t>(index);
+        return -1;
     }
 
     void emit_array(const std::size_t index) {
         arraysPending_[index].emitted = true;
         const auto slot = arraysPending_[index].slot;
         const auto* values = arraysPending_[index].values;
-        const auto descriptor = arraysPending_[index].descriptor;
-        const auto& field = document_.fields[descriptor];
+        const auto field = arraysPending_[index].field;
+        // Array data always goes in the array section, whichever region its slot is in.
+        const bool wasBoxed = inBoxed_;
+        inBoxed_ = false;
         if (values->empty()) {
-            put_number(slot, static_cast<std::uint32_t>(emptyArrayTarget_ - slot));
+            arraySlots_.push_back({slot, emptyArrayTarget_});
+            inBoxed_ = wasBoxed;
             return;
         }
         const auto data = align_up(payload_.size() + 4, element_alignment(field));
         const auto stride = element_stride(field);
         put_number(data - 4, checked_u32(values->size(), "EBX array count"));
         grow(data + stride * values->size());
-        put_number(slot, static_cast<std::uint32_t>(data - slot));
+        arraySlots_.push_back({slot, checked_u32(data, "EBX array data")});
         const auto firstChild = arraysPending_.size();
         for (std::size_t element = 0; element < values->size(); ++element) {
             const auto elementStart = data + element * stride;
@@ -395,17 +484,28 @@ private:
         for (std::size_t child = firstChild; child < arraysPending_.size(); ++child) {
             if (!arraysPending_[child].emitted) emit_array(child);
         }
+        inBoxed_ = wasBoxed;
     }
 
     void write_boxed_values() {
         boxedOffset_ = checked_u32(align_up(payload_.size(), 16), "EBX boxed section");
         grow(boxedOffset_);
+        // The decoded boxes first, as laid out; then any box that could not be decoded,
+        // copied as it was (its own pointers still relocated).
+        put(boxedOffset_, boxedBuffer_);
+        const auto rawBase = align_up(static_cast<std::size_t>(boxedOffset_) + boxedBuffer_.size(), 16);
+        std::unordered_set<std::int64_t> decoded;
+        for (const auto& pending : boxesPending_)
+            if (pending.value.value) decoded.insert(pending.value.dataOffset);
         std::unordered_map<std::uint32_t, std::uint32_t> moved;
-        std::vector<BoxedValueRecord> records = document_.boxedValues;
+        std::vector<BoxedValueRecord> records;
+        for (const auto& record : document_.boxedValues)
+            if (!decoded.contains(record.offset) && !decoded_nested(record.offset)) records.push_back(record);
         std::ranges::sort(records, {}, &BoxedValueRecord::offset);
+        const auto rawStart = records.empty() ? 0U : records.front().offset;
         for (const auto& source : records) {
             if (source.offset < document_.boxedValuesOffset) throw std::runtime_error("EBX boxed record precedes its section");
-            const auto offset = static_cast<std::size_t>(boxedOffset_) + source.offset - document_.boxedValuesOffset;
+            const auto offset = rawBase + source.offset - rawStart;
             put(offset, source.rawBytes);
             const auto relocate = [&](const std::vector<std::uint32_t>& sourceOffsets,
                                       std::vector<std::uint32_t>& destinationOffsets) {
@@ -424,13 +524,40 @@ private:
             authored.offset = checked_u32(offset, "EBX boxed value");
             boxed_.push_back(std::move(authored));
         }
-        for (const auto& pending : boxesPending_) {
+        rawMoved_ = std::move(moved);
+    }
+
+    // A raw record that a decoded box holds inside it was laid out with that box.
+    [[nodiscard]] bool decoded_nested(const std::uint32_t offset) const {
+        return nestedDecoded_.contains(offset);
+    }
+
+    // Everything recorded while a box was being laid out names a place in the box buffer;
+    // now the buffer has its place, give every such slot its payload offset, and write each
+    // array's and each box's displacement.
+    void place_boxed_region() {
+        for (auto* list : {&pointerOffsets_, &resourceOffsets_, &importOffsets_, &typeInfoOffsets_})
+            for (auto& slot : *list) slot = resolve(slot);
+        for (auto& pending : stringsPending_) pending.slot = resolve(pending.slot);
+        for (auto& pending : pointersPending_) pending.slot = resolve(pending.slot);
+        for (const auto& [slot, data] : arraySlots_) {
+            const auto at = resolve(slot);
+            put_number(at, static_cast<std::uint32_t>(data - at));
+        }
+        for (auto& record : boxedRecords_) {
+            record.offset = checked_u32(static_cast<std::size_t>(boxedOffset_) + record.offset, "EBX boxed value");
+            boxed_.push_back(record);
+        }
+        for (auto& pending : boxesPending_) {
+            pending.slot = resolve(pending.slot);
             put_number(pending.slot, pending.value.encodedType);
             put_number(static_cast<std::size_t>(pending.slot) + 4, std::uint32_t{});
-            const auto found = moved.find(static_cast<std::uint32_t>(pending.value.dataOffset));
-            const auto relative = found == moved.end()
-                ? pending.value.relativeOffset
-                : static_cast<std::int64_t>(found->second) - static_cast<std::int64_t>(pending.slot + 8);
+            std::int64_t relative = pending.value.relativeOffset;
+            if (pending.value.value) {
+                relative = static_cast<std::int64_t>(boxedOffset_) + pending.placed - static_cast<std::int64_t>(pending.slot + 8);
+            } else if (const auto found = rawMoved_.find(static_cast<std::uint32_t>(pending.value.dataOffset)); found != rawMoved_.end()) {
+                relative = static_cast<std::int64_t>(found->second) - static_cast<std::int64_t>(pending.slot + 8);
+            }
             put_number(static_cast<std::size_t>(pending.slot) + 8, relative);
         }
     }
@@ -504,19 +631,11 @@ private:
         writer.u32(boxedOffset_);
         writer.u32(stringOffset);
 
-        auto oldSlots = document_.boxedValueSlots;
-        std::vector<std::uint32_t> newSlots;
-        newSlots.reserve(boxesPending_.size());
-        for (const auto& pending : boxesPending_) newSlots.push_back(pending.slot);
-        std::ranges::sort(oldSlots);
-        std::ranges::sort(newSlots);
+        // Each reference knows where it sat in the source, so its entry follows it.
+        std::unordered_set<std::int64_t> listed(document_.boxedReferenceOffsets.begin(), document_.boxedReferenceOffsets.end());
         std::vector<std::uint32_t> trailing;
-        for (const auto old : document_.boxedReferenceOffsets) {
-            const auto found = std::ranges::lower_bound(oldSlots, old);
-            if (found == oldSlots.end() || *found != old) continue;
-            const auto index = static_cast<std::size_t>(found - oldSlots.begin());
-            if (index < newSlots.size()) trailing.push_back(newSlots[index]);
-        }
+        for (const auto& pending : boxesPending_)
+            if (pending.value.sourceSlot >= 0 && listed.contains(pending.value.sourceSlot)) trailing.push_back(pending.slot);
         write_table(writer, std::move(trailing));
         return writer.take();
     }
@@ -585,6 +704,12 @@ private:
     std::vector<PendingBoxed> boxesPending_;
     std::vector<ArrayRecord> arrays_;
     std::vector<BoxedValueRecord> boxed_;
+    std::vector<BoxedValueRecord> boxedRecords_;   // decoded boxes, offsets relative to the box buffer
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> arraySlots_; // slot (maybe box-relative), array data
+    std::vector<std::byte> boxedBuffer_;
+    std::unordered_map<std::uint32_t, std::uint32_t> rawMoved_;
+    std::unordered_set<std::uint32_t> nestedDecoded_;
+    bool inBoxed_{};
     std::uint32_t arraysOffset_{};
     std::uint32_t boxedOffset_{};
     std::uint32_t emptyArrayTarget_{};

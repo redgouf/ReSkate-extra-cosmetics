@@ -528,13 +528,60 @@ private:
             const auto target = static_cast<std::int64_t>(position + 8) + displacement -
                                 static_cast<std::int64_t>(document_.dataStart);
             document_.boxedValueSlots.push_back(static_cast<std::uint32_t>(position - document_.dataStart));
-            return Value{BoxedReference{encoded, target, displacement}};
+            BoxedReference reference{encoded, target, displacement};
+            reference.sourceSlot = static_cast<std::int64_t>(position - document_.dataStart);
+            if (encoded != 0) read_boxed(reference);
+            return Value{std::move(reference)};
         }
         case FieldType::structure:
             return Value{read_object(static_cast<std::int32_t>(classRef), position)};
         default:
             return Value{};
         }
+    }
+
+    // A boxed value is read like a field of the type its EBXX record names: the record's
+    // encoded type is a field's shifted left by one (as an ArrayRecord's is), and its class
+    // reference a fixup type slot. One that cannot be read stays undecoded and is copied as
+    // bytes by the writer.
+    void read_boxed(BoxedReference& reference) {
+        if (reference.dataOffset < 0) return;
+        if (records_.empty())
+            for (const auto& record : document_.boxedValues) records_.emplace(record.offset, &record);
+        const auto found = records_.find(static_cast<std::uint32_t>(reference.dataOffset));
+        if (found == records_.end()) return;
+        const auto& record = *found->second;
+        reference.record = {record.hash, record.encodedType, record.classRef};
+        FieldDescriptor field;
+        field.encodedType = static_cast<std::uint16_t>(record.encodedType >> 1);
+        if (record.classRef != 0xFFFF) {
+            const auto descriptor = descriptor_for_fixup(record.classRef);
+            if (descriptor < 0) return;
+            field.classRef = static_cast<std::uint16_t>(descriptor);
+        }
+        const auto type = field.type();
+        if (type == FieldType::structure && record.classRef == 0xFFFF) return;
+        if (type == FieldType::inherited || type == FieldType::dbObject || type == FieldType::fixedArray ||
+            type == FieldType::function || type == FieldType::interfaceType)
+            return;
+        const auto saved = reader_.position();
+        try {
+            const Nesting nesting(depth_);
+            auto value = read_field(field, document_.dataStart + static_cast<std::size_t>(reference.dataOffset));
+            reference.value = std::make_shared<const Value>(std::move(value));
+        } catch (const std::exception&) {
+            reference.value.reset();
+        }
+        reader_.seek(saved);
+    }
+
+    [[nodiscard]] std::int32_t descriptor_for_fixup(const std::uint16_t slot) const {
+        if (slot >= document_.fixupTypeGuids.size() || slot >= document_.fixupTypeSignatures.size()) return -1;
+        for (std::size_t index = 0; index < document_.types.size(); ++index)
+            if (document_.types[index].guid == document_.fixupTypeGuids[slot] &&
+                document_.types[index].signature == document_.fixupTypeSignatures[slot])
+                return static_cast<std::int32_t>(index);
+        return -1;
     }
 
     [[nodiscard]] std::string relative_string(const std::size_t base, const std::uint32_t displacement) {
@@ -555,6 +602,7 @@ private:
     BinaryReader reader_;
     Document& document_;
     unsigned depth_{};
+    std::unordered_map<std::uint32_t, const BoxedValueRecord*> records_;
 };
 
 }

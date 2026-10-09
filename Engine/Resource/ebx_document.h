@@ -136,10 +136,28 @@ struct ResourceReference {
     std::uint64_t id{};
 };
 
+struct Value;
+
+// A boxed value's own description, from its EBXX record: `encodedType` is a field type
+// shifted left by one, as in ArrayRecord, and `classRef` a fixup type slot.
+struct BoxedRecordInfo {
+    std::uint32_t hash{};
+    std::uint16_t encodedType{};
+    std::uint16_t classRef{0xFFFF};
+};
+
 struct BoxedReference {
     std::uint32_t encodedType{};
     std::int64_t dataOffset{-1};
     std::int64_t relativeOffset{};
+    // What the box holds, decoded like a field of the record's type, when the reader could:
+    // a pointer, a struct, a string, an array... The writer lays a decoded box out again
+    // with everything it refers to; one that is not decoded is copied byte for byte.
+    std::shared_ptr<const Value> value;
+    BoxedRecordInfo record;
+    // Where this reference sat in the source document's data, for EFIX's boxed-reference
+    // table; -1 for a reference made in memory.
+    std::int64_t sourceSlot{-1};
 };
 
 struct Value {

@@ -245,8 +245,16 @@ template <typename Visit> void each_pointer(Value& value, const Visit& visit) {
         if (*nested) for (auto& field : (*nested)->fields) each_pointer(field.value, visit);
         return;
     }
-    if (auto* list = std::get_if<Value::Array>(&value.data))
+    if (auto* list = std::get_if<Value::Array>(&value.data)) {
         for (auto& element : *list) each_pointer(element, visit);
+        return;
+    }
+    // A decoded box is shared and read-only: visit (and keep) a copy.
+    if (auto* boxed = std::get_if<BoxedReference>(&value.data); boxed && boxed->value) {
+        auto copy = detail::clone_value(*boxed->value);
+        each_pointer(copy, visit);
+        boxed->value = std::make_shared<const Value>(std::move(copy));
+    }
 }
 
 } // namespace
@@ -360,8 +368,30 @@ Value Carrier::value(const Value& source) {
         result.data = copy;
         return result;
     }
-    if (std::holds_alternative<BoxedReference>(source.data))
-        throw std::runtime_error("EBX merge cannot carry a boxed value yet");
+    if (const auto* boxed = std::get_if<BoxedReference>(&source.data)) {
+        // A decoded box is carried like any value; its record's type slot names a type of
+        // the source document, so it is found again in the target's fixup table.
+        if (boxed->encodedType != 0 && !boxed->value)
+            throw std::runtime_error("EBX merge cannot carry a boxed value it could not read");
+        auto copy = *boxed;
+        if (boxed->value) {
+            copy.value = std::make_shared<const Value>(value(*boxed->value));
+            if (boxed->record.classRef != 0xFFFF) {
+                const auto slot = boxed->record.classRef;
+                std::int32_t descriptor = -1;
+                if (slot < from_.fixupTypeGuids.size() && slot < from_.fixupTypeSignatures.size())
+                    for (std::size_t index = 0; index < from_.types.size(); ++index)
+                        if (from_.types[index].guid == from_.fixupTypeGuids[slot] &&
+                            from_.types[index].signature == from_.fixupTypeSignatures[slot])
+                            descriptor = static_cast<std::int32_t>(index);
+                if (descriptor < 0) throw std::runtime_error("EBX boxed value type is not in the type table");
+                copy.record.classRef = ensure_fixup_type(to_, type(descriptor));
+            }
+        }
+        copy.sourceSlot = -1;
+        result.data = std::move(copy);
+        return result;
+    }
     result = source;
     return result;
 }
@@ -377,6 +407,12 @@ std::shared_ptr<Object> clone_object(const Object& source) {
 
 Value clone_value(const Value& source) {
     Value result;
+    if (const auto* boxed = std::get_if<BoxedReference>(&source.data)) {
+        auto copy = *boxed;
+        if (boxed->value) copy.value = std::make_shared<const Value>(clone_value(*boxed->value));
+        result.data = std::move(copy);
+        return result;
+    }
     if (const auto* nested = std::get_if<std::shared_ptr<Object>>(&source.data)) {
         result.data = *nested ? clone_object(**nested) : nullptr;
         return result;
@@ -445,8 +481,16 @@ void sort_instances(Document& document) {
             if (*nested) for (auto& field : (*nested)->fields) self(self, field.value);
             return;
         }
-        if (auto* list = std::get_if<Value::Array>(&value.data))
+        if (auto* list = std::get_if<Value::Array>(&value.data)) {
             for (auto& element : *list) self(self, element);
+            return;
+        }
+        // A decoded box is shared and read-only: remap a copy.
+        if (auto* boxed = std::get_if<BoxedReference>(&value.data); boxed && boxed->value) {
+            auto copy = clone_value(*boxed->value);
+            self(self, copy);
+            boxed->value = std::make_shared<const Value>(std::move(copy));
+        }
     };
     for (auto& instance : document.instances)
         if (instance.object)

@@ -15,6 +15,7 @@ std::string_view buildkit_fallback(const char* key) {
         if (id[size]) continue;
         const std::string_view value(id.data(), size);
         for (const auto& entry : buildkit_labels) if (value == entry.id) return entry.text;
+        for (const auto& entry : cosmetic_labels) if (value == entry.id) return entry.text;
         return challenge_title_fallback(value);
     }
     return {};

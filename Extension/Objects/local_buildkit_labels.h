@@ -4,6 +4,12 @@
 namespace dingosdk::profile_runtime {
 struct BuildKitLabel { std::string_view id, text; };
 
+// Wardrobe text for slots a mod adds, which the game's string tables cannot have.
+// The Misc 1 accessory slot mod names its Accessories tab with this key.
+inline constexpr BuildKitLabel cosmetic_labels[]{
+    {"ID_CUSTOMIZE_SKATER_ACCESSORIES_MISC1", "Misc 1"},
+};
+
 inline constexpr BuildKitLabel buildkit_labels[]{
     {"ID_BK_1", "1"}, {"ID_BK_2", "2"}, {"ID_BK_3", "3"},
     {"ID_BK_15", "15"}, {"ID_BK_30", "30"}, {"ID_BK_45", "45"},

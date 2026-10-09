@@ -8,6 +8,7 @@
 #include "Extension/Customization/local_customization_runtime.h"
 #include "Extension/Customization/local_player_card_runtime.h"
 #include <Windows.h>
+#include <atomic>
 #include <mutex>
 #include <set>
 
@@ -71,6 +72,22 @@ void apply_cosmetic_recipe(std::uintptr_t base, std::uintptr_t entity, std::uint
     // Items this PC does not have (a player's cosmetics mod) would reject the
     // whole outfit: they become the matching default, or an empty slot.
     auto usable = recipe;
+    // A peer with other slot mods sends another slot list: match it to ours by
+    // slot, so their outfit still shows in every slot both games have.
+    const auto own_parameters = memory.slot_parameters(local);
+    const auto stand_in = [&](std::uint32_t slot) -> const std::vector<std::uint32_t> * {
+        const auto found = own_parameters.find(slot);
+        return found == own_parameters.end() ? nullptr : &found->second;
+    };
+    if (const auto aligned = memory.align(resource, usable, stand_in); aligned.changed()) {
+        static std::atomic<std::uint32_t> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 32)
+            logging::log(logging::Level::info, logging::Channel::runtime,
+                         "Multiplayer: a player's {} slots differ from this game's (a mod that adds slots): "
+                         "{} of theirs left out, {} of ours empty, {} with another layout emptied.",
+                         usable.key == skater_recipe_key ? "skater" : "board", aligned.dropped, aligned.added,
+                         aligned.reshaped);
+    }
     const auto reserved = [](const std::string &asset) { return profile_runtime::reserved_cosmetic(asset); };
     for (const auto &[missing, replacement] :
          memory.substitute_missing(resource, usable, default_cosmetic_items, reserved)) {

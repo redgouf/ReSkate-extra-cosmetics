@@ -618,6 +618,59 @@ void cosmetic_layout_regression() {
     check(modded.items[0].asset.empty() && !reject(m, modded), "A missing peer item without a default must become empty");
     modded = one;
     check(fake.substitute_missing(res, modded, fallbacks).empty() && modded == one, "Installed peer items must stay");
+    // Peers with other slot mods: their recipe is laid out as this template, by slot.
+    const std::vector<std::uint32_t> own_shirt_parameters{9};
+    const auto stand_in = [&](std::uint32_t slot) -> const std::vector<std::uint32_t> * {
+        return slot == 11 ? &own_shirt_parameters : nullptr;
+    };
+    const auto no_stand_in = [](std::uint32_t) -> const std::vector<std::uint32_t> * { return nullptr; };
+    auto peer = one;
+    auto aligned = fake.align(res, peer, stand_in);
+    check(!aligned.changed() && peer == one && !reject(m, peer), "A peer with the same slots must stay as sent");
+    peer = recipe; // slot 11, then slot 12, which this template does not have
+    peer.items[1].asset = "Own_Misc";
+    aligned = fake.align(res, peer, stand_in);
+    check(aligned.dropped == 1 && !aligned.added && !aligned.reshaped && peer == one && !reject(m, peer),
+          "A peer slot this template does not have must be left out");
+    peer = one;
+    peer.items[0].slot = 99;
+    aligned = fake.align(res, peer, stand_in);
+    check(aligned.dropped == 1 && aligned.added == 1 && peer.items.size() == 1 && peer.items[0].slot == 11 &&
+              peer.items[0].asset.empty() && peer.items[0].parameters == own_shirt_parameters && !reject(m, peer),
+          "A template slot the peer did not send must be empty, with the local parameters");
+    peer = one;
+    peer.items[0].slot = 99;
+    fake.align(res, peer, no_stand_in);
+    check(peer.items.size() == 1 && peer.items[0].parameters == std::vector<std::uint32_t>{0} && !reject(m, peer),
+          "Without a stand-in an added slot must get zeroed parameters of the slot's size");
+    peer = one;
+    peer.items[0].parameters = {1, 2};
+    aligned = fake.align(res, peer, stand_in);
+    check(aligned.reshaped == 1 && peer.items[0].asset.empty() && peer.items[0].parameters == own_shirt_parameters &&
+              !reject(m, peer),
+          "A peer slot with another parameter layout must be emptied, not sent to the game");
+    {
+        // Two template slots: a peer that lists them in another order is put back in ours.
+        auto two = m;
+        constexpr std::uintptr_t misc = 0x220000, misc_parameters = 0x230000;
+        two.put(slots - 4, std::uint32_t{2});
+        two.put(slots + 24 + 8, misc | 4);
+        two.put(misc + 8, fixture_base + engine::cosmetic_slot_type);
+        two.put(misc + 0x4c, std::uint32_t{12});
+        two.put(misc + 0x18, misc_parameters);
+        two.put(misc_parameters - 4, std::uint32_t{0});
+        two.put(misc + 0x30, category | 4);
+        const CosmeticMemory both{std::cref(two), fixture_base};
+        CosmeticRecipe reversed{recipe.key, recipe.version, recipe.scalars, {recipe.items[1], recipe.items[0]}};
+        aligned = both.align(res, reversed, stand_in);
+        check(!aligned.changed() && reversed == recipe && !reject(two, reversed),
+              "A peer's slots must be put in this template's order");
+        auto older = one; // a peer without the mod that adds slot 12
+        aligned = both.align(res, older, stand_in);
+        check(aligned.added == 1 && !aligned.dropped && older.items.size() == 2 && older.items[1].slot == 12 &&
+                  older.items[1].asset.empty() && older.items[1].parameters.empty() && !reject(two, older),
+              "A peer without a slot mod must get that slot empty");
+    }
     auto bad = m;
     bad.put(categories, category + 0x100);
     bad.put(category + 0x138, std::uint32_t{88});

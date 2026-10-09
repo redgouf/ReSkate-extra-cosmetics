@@ -200,6 +200,80 @@ template <class Read> struct CosmeticMemory {
         }
         return swaps;
     }
+    // One slot of this PC's template: the slot's name hash and how many parameter
+    // words an item in it carries.
+    struct TemplateSlot {
+        std::uint32_t slot{};
+        std::size_t parameters{};
+    };
+    std::vector<TemplateSlot> template_slots(std::uintptr_t res) const {
+        const auto slots = ptr(res, 0x28);
+        std::vector<TemplateSlot> out(count(slots, 24, max_cosmetic_slots));
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            const auto slot = ptr(slots, i * 24 + 8) & ~std::uintptr_t{4};
+            check(ptr(slot, 8) == base + addr::engine::cosmetic_slot_type, "Cosmetic slot type differs.");
+            out[i] = {get<std::uint32_t>(slot, 0x4c), count(ptr(slot, 0x18), 4, max_cosmetic_parameters)};
+        }
+        return out;
+    }
+    // What align changed: peer slots this PC's template does not have (left out),
+    // template slots the peer sent nothing for, and slots whose parameter layout
+    // differs here (both started on their stand-in, with nothing in them).
+    struct Alignment {
+        std::size_t dropped{}, added{}, reshaped{};
+        bool changed() const noexcept { return dropped || added || reshaped; }
+    };
+    // Lays a peer's recipe out as this PC's template, slot by slot, matched by the
+    // slot's name hash rather than its position. Players with different slot mods
+    // (one that adds a "Misc 1" slot, a wheel slot per wheel) otherwise disagree on
+    // the recipe's shape, and validate turns the whole outfit down. A slot the peer
+    // has and this PC does not is left out; one this PC has and the peer does not
+    // is empty, with `stand_in(slot)` parameters when they fit the slot (the local
+    // player's own, so their layout is right), else zeros. Scalars are not slots
+    // and are left to validate.
+    template <class StandIn>
+    Alignment align(std::uintptr_t res, CosmeticRecipe &r, const StandIn &stand_in) const {
+        const auto layout = template_slots(res);
+        Alignment out;
+        std::map<std::uint32_t, CosmeticSlot *> sent;
+        for (auto &item : r.items)
+            sent.emplace(item.slot, &item);
+        std::vector<CosmeticSlot> items;
+        items.reserve(layout.size());
+        for (const auto &slot : layout) {
+            const auto found = sent.find(slot.slot);
+            if (found != sent.end() && found->second->parameters.size() == slot.parameters) {
+                items.push_back(std::move(*found->second));
+                sent.erase(found);
+                continue;
+            }
+            if (found != sent.end()) {
+                ++out.reshaped;
+                sent.erase(found);
+            } else {
+                ++out.added;
+            }
+            CosmeticSlot empty{slot.slot, {}, {}};
+            const std::vector<std::uint32_t> *own = stand_in(slot.slot);
+            if (own && own->size() == slot.parameters)
+                empty.parameters = *own;
+            else
+                empty.parameters.assign(slot.parameters, 0);
+            items.push_back(std::move(empty));
+        }
+        out.dropped = sent.size();
+        r.items = std::move(items);
+        return out;
+    }
+    // Each slot's parameters on an actor's live recipe (the local player's), by
+    // slot name hash: align's stand-ins.
+    std::map<std::uint32_t, std::vector<std::uint32_t>> slot_parameters(std::uintptr_t component) const {
+        std::map<std::uint32_t, std::vector<std::uint32_t>> out;
+        for (const auto &item : array<NativeCosmeticItem>(ptr(component, 0x158), max_cosmetic_slots))
+            out.emplace(item.slot, array<std::uint32_t>(reinterpret_cast<std::uintptr_t>(item.parameters),
+                                                         max_cosmetic_parameters));
+        return out;
+    }
     void validate(std::uintptr_t res, const CosmeticRecipe &r) const {
         check(r.key == get<std::uint32_t>(res, 0x38) && r.version == get<std::uint32_t>(res, 0x3c),
               "Peer cosmetic template differs from this game.");

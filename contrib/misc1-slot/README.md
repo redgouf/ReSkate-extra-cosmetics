@@ -11,7 +11,7 @@ wardrobe's Accessories page. No game data is kept here; the tools read it from t
 | `gameplay/characters/data/recipe/skaterslots` (`cas_main_sharedbundle`) | a `cust_misc1` customization slot, copied from `cust_hats` |
 | `items/cust_misc1/cust_misc1` (`cas_main_sharedbundle`) | new item type, display name "Misc 1" |
 | `items/itemmastercollection` (`cas_main_sharedbundle`) | registers the test item |
-| `items/cust_misc1/own_misc1_test_beaniewatch_00009` (`cas_main_sharedbundle`) | test item: the black beanie as a Misc 1 item |
+| `items/cust_misc1/own_misc1_test_beaniewatch_00009` (`cas_main_sharedbundle`) | test item: the beanie mesh with the free beanie 00001's preset |
 | `gameplay/characters/data/recipetemplate/casrecipetemplate` (`bam_levelroot`, `dingolevel_splash`) | a `Misc1` port on the new slot |
 | `characters/maincharacters/generic/cas/common/slots/cas_misc1_slot` (`bam_levelroot`) | new body mesh slot `CAS_Misc1_Slot` |
 | `characters/maincharacters/generic/cas/common/loaders/cas_rsp_lualoader_prefab` (`bam_levelroot`) | `Misc1` -> `CAS_Misc1_Slot` in the loader's slot list |
@@ -31,6 +31,9 @@ script and the wardrobe page are taken whole from the highest-priority mod that 
 - The item's mesh names its material `misc1_mat`.
 - Register the item in `items/itemmastercollection`, like any new cosmetic.
 - Item packs depend on the Misc 1 mod.
+- An item must not use an appearance preset (its look) that only a store item uses: ReSkate
+  refuses such a mod whole ("merge error 0x5343", `Engine/Vfs/mod_store_copies.h`). Meshes are
+  shared and fine; give the item a preset of its own, or a free item's.
 
 ## Building
 

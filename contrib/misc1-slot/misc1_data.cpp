@@ -186,6 +186,21 @@ int main(int argc, char **argv) {
         field(itemObject, "Name").data = std::string("Items/" + typeName + "/" + itemKey);
         field(itemObject, "Key").data = itemKey;
         set_number(field(itemObject, "HashedAssetKey"), djb2(itemKey));
+        // ReSkate refuses a mod item that looks like an item the game's store sells
+        // (mod_store_copies.h). Beanie 00009 is a store item; 00001 is not, so the test
+        // item wears 00001's appearance preset (colours) on the beanie mesh both share.
+        {
+            const auto &pointer = as<ebx::PointerReference>(field(itemObject, "ItemData"), "ItemData");
+            if (pointer.kind != ebx::PointerKind::internal) throw std::runtime_error("ItemData is not in the item");
+            auto &data = *item.instances.at(pointer.index).object;
+            int replaced = 0;
+            for (auto &path : as<ebx::Value::Array>(field(data, "AssetPaths"), "AssetPaths")) {
+                auto &entry = *as<std::shared_ptr<ebx::Object>>(path, "asset path");
+                auto &name = as<std::string>(field(entry, "AssetName"), "AssetName");
+                if (name == "Gen_Hat_BeanieWatch_00009_AP") name = "Gen_Hat_BeanieWatch_00001_AP", ++replaced;
+            }
+            if (replaced != 1) throw std::runtime_error("the beanie's appearance preset was not found");
+        }
         auto &categories = as<ebx::Value::Array>(field(itemObject, "Categories"), "Categories");
         categories.assign(1, ebx::Value{ebx::PointerReference{ebx::PointerKind::external, add_import(item, typeFile, typeRoot)}});
         ebx::detail::sort_instances(item);

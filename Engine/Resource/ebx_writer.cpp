@@ -201,7 +201,16 @@ private:
             if (!instance.rawImage.empty()) {
                 put(start, std::span(instance.rawImage).first(std::min<std::size_t>(instance.rawImage.size(), type.size)));
             }
+            // The instance header the engine loads in place: type slot, a constant 2, and
+            // flags whose 0x100 bit says a GUID sits just before the instance. Every game
+            // instance has 0xb100 (exported) or 0xa000 (internal); an instance made in memory
+            // has no raw image to carry them, and one with 0x100 clear while exported makes
+            // the engine read a null GUID when it resolves other partitions' imports of it.
             put_number(start, instance.fixupType);
+            if (type.size >= 0x18) {
+                put_number(start + 0x10, std::uint32_t{2});
+                put_number(start + 0x14, std::uint32_t{instance.exported ? 0xb100u : 0xa000u});
+            }
             write_type(static_cast<std::size_t>(instance.descriptor), start, instance.object.get());
             instanceOffsets_.push_back(checked_u32(start, "EBX instance offset"));
             cursor = start + type.size;

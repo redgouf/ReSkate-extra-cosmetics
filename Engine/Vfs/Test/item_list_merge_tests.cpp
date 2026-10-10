@@ -546,6 +546,31 @@ void the_list_other_copies_are_given(const Game& game, const CasStore& store) {
 }
 } // namespace
 
+// Instances a tool makes in memory have no bytes of the game's to carry their header. The
+// engine loads EBX in place and finds an exported instance's GUID by the header's 0x100
+// flag; written without it, the game crashes resolving an import of that instance.
+void instances_made_in_memory_keep_their_header(const Game& game) {
+    auto item = fb::ebx::detail::clone_document(game.item);
+    const bool allExported = std::ranges::all_of(item.instances, &fb::ebx::InstanceRecord::exported);
+    auto made = item.instances.front();
+    made.rawImage.clear();
+    if (allExported) {
+        made.instanceGuid = guid(0x7E);
+        item.instances.push_back(made);
+    }
+    made.exported = false;
+    made.instanceGuid = {};
+    item.instances.push_back(made);
+    const auto bytes = fb::ebx::write_document(item);
+    const auto written = fb::ebx::read_document(bytes);
+    expect(written.instances.size() == item.instances.size(), "made in memory: every instance is written");
+    for (const auto& instance : written.instances) {
+        const auto at = written.dataStart + instance.dataOffset;
+        const auto flags = static_cast<unsigned>(bytes.at(at + 0x14)) | static_cast<unsigned>(bytes.at(at + 0x15)) << 8;
+        expect(flags == (instance.exported ? 0xb100U : 0xa000U), "made in memory: an instance's header says whether it has a GUID");
+    }
+}
+
 int main(int argc, char** argv) try {
     if (argc < 2 || !fs::exists(fs::path(argv[1]) / L"Data" / L"Win32" / L"items.toc")) {
         std::cout << "No game given; skipped.\n";
@@ -565,6 +590,7 @@ int main(int argc, char** argv) try {
     values_two_mods_changed(game, store, true);
     a_change_that_does_not_combine(game, store);
     the_list_other_copies_are_given(game, store);
+    instances_made_in_memory_keep_their_header(game);
     if (failures) {
         std::cerr << failures << " failure(s)\n";
         return 1;

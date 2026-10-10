@@ -1,5 +1,5 @@
 // Adds the Misc 1 tab to the wardrobe's Accessories page.
-// misc1_wardrobe <ms_skater_slots_contentresources.ebx> <ms_tabbedcontentslotpages_contentresources.ebx> <out dir>
+// misc1_wardrobe <ms_skater_slots_contentresources.ebx> <ms_tabbedcontentslotpages_contentresources.ebx> <out dir> <ms_presentationtemplate_contentresources.ebx>
 #include "Engine/Resource/ebx_carry.h"
 #include "Engine/Resource/ebx_writer.h"
 #include <filesystem>
@@ -106,8 +106,8 @@ struct Rewrite {
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 4) {
-        std::cerr << "usage: misc1_wardrobe <ms_skater_slots_contentresources.ebx> <ms_tabbedcontentslotpages_contentresources.ebx> <out dir>\n";
+    if (argc != 5) {
+        std::cerr << "usage: misc1_wardrobe <ms_skater_slots_contentresources.ebx> <ms_tabbedcontentslotpages_contentresources.ebx> <out dir> <ms_presentationtemplate_contentresources.ebx>\n";
         return 2;
     }
     try {
@@ -137,9 +137,9 @@ int main(int argc, char **argv) {
             {prefix + "HeadwearSlot", prefix + "Misc1Slot"},
             {prefix + "Headwear_Stub", prefix + "Misc1_Stub"},
             {prefix + "Headwear_Tab", prefix + "Misc1_Tab"},
-            {"ID_CUSTOMIZE_SKATER_HEAD_HEADWEAR", "ID_CUSTOMIZE_SKATER_ACCESSORIES_MISC1"},
+            {"ID_CUSTOMIZE_SKATER_HEAD_HEADWEAR", "Misc 1"},   // shown as written: the game has no text for a key of ours
         };
-        for (const auto &[from, guid] : {std::pair{slotIndex, newSlotGuid}, {stubIndex, newStubGuid}, {tabIndex, newTabGuid}}) {
+        for (const auto [from, guid] : {std::pair{slotIndex, newSlotGuid}, {stubIndex, newStubGuid}, {tabIndex, newTabGuid}}) {
             auto copy = slots.instances.at(from);
             copy.instanceGuid = guid;
             copy.rawImage.clear();
@@ -155,6 +155,58 @@ int main(int argc, char **argv) {
             }
         ebx::detail::sort_instances(slots);
         save(out / "ms_skater_slots_contentresources.ebx", ebx::write_document(slots));
+
+        // ---- MS_PresentationTemplate_ContentResources: the Misc 1 tab's own template ----------
+        // A page entry pairs a template with a stub. The template names the Slot object whose
+        // items the grid shows, and the wardrobe makes one tab per template: Misc 1 needs a
+        // template of its own, naming the Misc 1 Slot.
+        auto templates = ebx::detail::clone_document(ebx::read_document(load(argv[4])));
+        const auto headwearTemplate = by_debug_name(templates, "MS_PresentationTemplate_ContentResources/MS_PresentationTemplate_Accessories_Headwear");
+        std::vector<std::int32_t> owned{headwearTemplate};   // the template and what it points at inside its file
+        {
+            std::function<void(const ebx::Value &)> walk = [&](const ebx::Value &v) {
+                if (auto *p = std::get_if<ebx::PointerReference>(&v.data)) {
+                    if (p->kind == ebx::PointerKind::internal && p->index != 0 && std::ranges::find(owned, p->index) == owned.end()) {
+                        owned.push_back(p->index);
+                        for (auto &f : templates.instances.at(p->index).object->fields) walk(f.value);
+                    }
+                } else if (auto *o = std::get_if<std::shared_ptr<ebx::Object>>(&v.data)) { if (*o) for (auto &f : (*o)->fields) walk(f.value); }
+                else if (auto *a = std::get_if<ebx::Value::Array>(&v.data)) { for (auto &e : *a) walk(e); }
+                else if (auto *b = std::get_if<ebx::BoxedReference>(&v.data)) { if (b->value) walk(*b->value); }
+            };
+            for (auto &f : templates.instances.at(headwearTemplate).object->fields) walk(f.value);
+        }
+        std::cerr << "template owns " << owned.size() << " instance(s)" << std::endl;
+        const auto headwearSlotGuid = slots.instances.at(static_cast<std::size_t>(std::distance(slots.instances.begin(), std::ranges::find_if(slots.instances, [&](const ebx::InstanceRecord &r) {
+            return r.object && field(*r.object, "DebugName") && std::get_if<std::string>(&field(*r.object, "DebugName")->data) &&
+                   *std::get_if<std::string>(&field(*r.object, "DebugName")->data) == prefix + "HeadwearSlot"; })))).instanceGuid;
+        Rewrite templateCopy;
+        bool namesSlot = false;
+        for (std::size_t i = 0; i < templates.imports.size(); ++i)
+            if (templates.imports[i].fileGuid == slots.fileGuid && templates.imports[i].classGuid == headwearSlotGuid) {
+                templateCopy.imports[static_cast<std::int32_t>(i)] = add_import(templates, slots.fileGuid, newSlotGuid);
+                namesSlot = true;
+            }
+        if (!namesSlot) throw std::runtime_error("the Headwear template does not name the Headwear Slot");
+        templateCopy.strings = {{"MS_PresentationTemplate_ContentResources/MS_PresentationTemplate_Accessories_Headwear",
+                                 "MS_PresentationTemplate_ContentResources/MS_PresentationTemplate_Accessories_Misc1"}};
+        const auto templateBase = static_cast<std::int32_t>(templates.instances.size());
+        for (std::size_t k = 0; k < owned.size(); ++k) templateCopy.internal[owned[k]] = templateBase + static_cast<std::int32_t>(k);
+        const Guid newTemplateGuid = guid_of("misc1/ui/template");
+        for (std::size_t k = 0; k < owned.size(); ++k) {
+            auto copy = templates.instances.at(owned[k]);
+            copy.instanceGuid = k == 0 ? newTemplateGuid : guid_of("misc1/ui/template/" + std::to_string(k));
+            copy.rawImage.clear();
+            copy.object = templateCopy.object(*templates.instances.at(owned[k]).object);
+            templates.instances.push_back(std::move(copy));
+        }
+        for (auto &f : templates.instances.at(0).object->fields)
+            if (f.name == "Resources")
+                std::get<ebx::Value::Array>(f.value.data).push_back(ebx::Value{ebx::PointerReference{ebx::PointerKind::internal, templateBase}});
+        const auto headwearTemplateGuid = templates.instances.at(headwearTemplate).instanceGuid;
+        const auto templatesFile = templates.fileGuid;
+        ebx::detail::sort_instances(templates);
+        save(out / "ms_presentationtemplate_contentresources.ebx", ebx::write_document(templates));
 
         // ---- MS_TabbedContentSlotPages_ContentResources: Misc 1 on the Accessories page --------
         auto pages = ebx::detail::clone_document(ebx::read_document(load(pagesPath)));
@@ -184,11 +236,18 @@ int main(int argc, char **argv) {
             if (static_cast<std::int32_t>(i) != accessories && pages.instances[i].object) {
                 bool hit = false;
                 for (auto &f : pages.instances[i].object->fields) hit |= mentions(f.value);
-                if (hit) entry = static_cast<std::int32_t>(i);
+                if (hit) { entry = static_cast<std::int32_t>(i); std::cerr << "mentions stub: #" << i << " " << pages.types.at(pages.instances[i].object->descriptor).name << " exported=" << pages.instances[i].exported << std::endl; }
             }
         if (entry < 0) throw std::runtime_error("the Accessories page's Headwear entry is missing");
         Rewrite entryCopy;
         entryCopy.imports[stubImport] = add_import(pages, slotsFile, newStubGuid);
+        {
+            std::int32_t templateImport = -1;
+            for (std::size_t i = 0; i < pages.imports.size(); ++i)
+                if (pages.imports[i].fileGuid == templatesFile && pages.imports[i].classGuid == headwearTemplateGuid) templateImport = static_cast<std::int32_t>(i);
+            if (templateImport < 0) throw std::runtime_error("the Accessories page does not name the Headwear template");
+            entryCopy.imports[templateImport] = add_import(pages, templatesFile, newTemplateGuid);
+        }
         const auto newEntry = static_cast<std::int32_t>(pages.instances.size());
         auto copy = pages.instances.at(entry);
         copy.rawImage.clear();
@@ -212,7 +271,7 @@ int main(int argc, char **argv) {
             if (!pages.instances[i].object || static_cast<std::int32_t>(i) == newEntry) continue;
             const auto before = appended;
             auto edited = pageEdit.object(*pages.instances[i].object);
-            if (appended != before) pages.instances[i].object = edited;
+            if (appended != before) { pages.instances[i].object = edited; std::cerr << "tab list in #" << i << " " << pages.types.at(edited->descriptor).name << std::endl; }
         }
         if (appended != 1) throw std::runtime_error("expected one tab list on the Accessories page, found " + std::to_string(appended));
         ebx::detail::sort_instances(pages);

@@ -17,6 +17,7 @@ wardrobe's Accessories page. No game data is kept here; the tools read it from t
 | `characters/maincharacters/generic/cas/common/loaders/cas_rsp_lualoader_prefab` (`bam_levelroot`) | `Misc1` -> `CAS_Misc1_Slot` in the loader's slot list |
 | `characters/lua/skaterlualoaderasset` (`bam_levelroot`, resource) | `SkaterLoader.lua` gains `misc1_loader.lua`, called from `loader.loadAsset` after headgear |
 | `ui/features/mystuff/flow/ms_skater_slots_contentresources` (`bam_coregameassets`) | `MS_Skater_Accessories_Misc1Slot/_Stub/_Tab`, copied from Headwear |
+| `ui/features/mystuff/ms_presentationtemplate_contentresources` (`bam_coregameassets`) | `MS_PresentationTemplate_Accessories_Misc1`, copied from Headwear's and naming the Misc 1 Slot (the wardrobe makes one tab per template, and the template decides which items the grid shows) |
 | `ui/features/mystuff/ms_tabbedcontentslotpages_contentresources` (`bam_coregameassets`) | the Misc 1 tab on the Accessories page |
 
 ReSkate's mod merge combines the additions to `SkaterSlots`, the template and the item
@@ -39,7 +40,7 @@ script and the wardrobe page are taken whole from the highest-priority mod that 
 
 1. Decode the base assets listed at the top of `misc1_data.cpp` and the two wardrobe assets
    from the game (ReSkate's `Engine/Resource` readers; the game's archives use Oodle).
-2. `misc1_data <base assets> <out>` and `misc1_wardrobe <slots asset> <pages asset> <out>`.
+2. `misc1_data <base assets> <out>` and `misc1_wardrobe <slots asset> <pages asset> <out> <presentation templates asset>`.
 3. Rebuild the script resource: the game's `SkaterLoader.lua` with `misc1_loader.lua` inserted
    before the handwear loader, the guarded call (at the end of that file) after headgear, and the header's source length and
    pointer-table offset (also the resource meta) updated.

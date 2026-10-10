@@ -13,6 +13,7 @@ wardrobe's Accessories page. No game data is kept here; the tools read it from t
 | `items/itemmastercollection` (`cas_main_sharedbundle`) | registers the test item |
 | `items/cust_misc1/own_misc1_test_beaniewatch_00009` (`cas_main_sharedbundle`) | test item: the beanie mesh with the free beanie 00001's preset |
 | `gameplay/characters/data/recipetemplate/casrecipetemplate` (`bam_levelroot`, `dingolevel_splash`) | a `Misc1` port on the new slot |
+| `gameplay/characters/data/recipe/computedrecipes/computedrecipe_casrecipetemplate*` (40, `delmargameconfiguration` in `globals.toc`) | an empty Misc 1 equip at the end of each (`misc1_recipes`): they list one equip per template port, in the template's order, and with the port added to the template alone the skater is not drawn |
 | `characters/maincharacters/generic/cas/common/slots/cas_misc1_slot` (`bam_levelroot`) | new body mesh slot `CAS_Misc1_Slot` |
 | `characters/maincharacters/generic/cas/common/loaders/cas_rsp_lualoader_prefab` (`bam_levelroot`) | `Misc1` -> `CAS_Misc1_Slot` in the loader's slot list |
 | `characters/lua/skaterlualoaderasset` (`bam_levelroot`, resource) | `SkaterLoader.lua` gains `misc1_loader.lua`, called from `loader.loadAsset` after headgear |

@@ -334,7 +334,7 @@ private:
             const auto encoded = reference ? reference->encoded : 0U;
             put_number(position, encoded);
             put_number(position + 4, std::uint32_t{});
-            if (encoded != 0 && field.type() == FieldType::typeRef) {
+            if (encoded != 0) {
                 typeInfoOffsets_.push_back(slot_at(position, "EBX type-info slot"));
             }
             break;

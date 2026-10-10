@@ -25,3 +25,13 @@ local function loadMisc1SlotAsync( recipe)
         blueprintFuture,
         appearanceShaderPresetFuture)
 end
+
+--The call, in loader.loadAsset right after headgear. It is guarded: if the recipe or the slot
+--list cannot be asked for Misc 1, the rest of the outfit still loads.
+--    --misc 1: guarded, so that an error in it never costs the rest of the outfit
+--    if (pcall ~= nil) then
+--        local misc1Ok, misc1Item = pcall(loadMisc1SlotAsync, recipe)
+--        if (misc1Ok) then
+--            addToItems(misc1Item, items)
+--        end
+--    end

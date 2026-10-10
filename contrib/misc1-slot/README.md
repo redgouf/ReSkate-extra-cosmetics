@@ -41,7 +41,7 @@ script and the wardrobe page are taken whole from the highest-priority mod that 
    from the game (ReSkate's `Engine/Resource` readers; the game's archives use Oodle).
 2. `misc1_data <base assets> <out>` and `misc1_wardrobe <slots asset> <pages asset> <out>`.
 3. Rebuild the script resource: the game's `SkaterLoader.lua` with `misc1_loader.lua` inserted
-   before the handwear loader, a call after headgear, and the header's source length and
+   before the handwear loader, the guarded call (at the end of that file) after headgear, and the header's source length and
    pointer-table offset (also the resource meta) updated.
 4. `pack <spec> <mod dir>`, a spec naming each base TOC, bundle, base manifest and payload.
 5. `verify <mod toc> <base toc> <mod cas_01.cas> <bundle>=<base manifest>...` lists what the
